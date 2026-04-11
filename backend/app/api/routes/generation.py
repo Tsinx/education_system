@@ -23,6 +23,7 @@ from app.services.dashscope_service import (
     chat_once,
     stream_chat,
 )
+from app.services.bigmodel_mcp_service import build_web_search_context
 from app.services.local_retrieval_service import retrieve_course_chunks_local
 from app.services.material_pipeline import ai_result_repo, repository
 
@@ -34,6 +35,8 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
     results: list[AiResultItem] = []
     user_guidance = payload.user_guidance.strip()
     course_name, hours, course_description, sessions = _get_course_info(payload.course_id)
+    if "ideology_case" in payload.output_types and not _load_outline_reference(payload.course_id):
+        raise HTTPException(status_code=400, detail="请先生成并完成课程大纲，再创建思政案例") from None
     logger.info(
         "API 生成任务创建 | course={} | outputs={} | guidance_len={}",
         payload.course_id,
@@ -42,12 +45,45 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
     )
     for output_type in payload.output_types:
         label = AiOutputLabel.get(output_type, output_type)
-        if output_type != "lesson_plan":
+        if output_type not in {"lesson_plan", "ideology_case"}:
             item = ai_result_repo.create_result(
                 course_id=payload.course_id,
                 output_type=output_type,
                 title=label,
                 request_context={"user_guidance": user_guidance},
+            )
+            results.append(item)
+            continue
+        if output_type == "ideology_case":
+            outline_reference = _load_outline_reference(payload.course_id)
+            if not outline_reference:
+                raise HTTPException(status_code=400, detail="请先生成并完成课程大纲，再创建思政案例") from None
+            workflow = await _plan_ideology_case_workflow(
+                course_name=course_name,
+                course_description=course_description,
+                outline_reference=outline_reference,
+                user_guidance=user_guidance,
+            )
+            logger.info(
+                "思政案例 Agentic 工作流完成 | course={} | topic={} | search_needed={}",
+                payload.course_id,
+                workflow["topic"],
+                workflow["search_needed"],
+            )
+            item = ai_result_repo.create_result(
+                course_id=payload.course_id,
+                output_type=output_type,
+                title=_build_ideology_case_title(workflow["topic"]),
+                request_context={
+                    "user_guidance": user_guidance,
+                    "ideology_topic": workflow["topic"],
+                    "ideology_outline_case": workflow["outline_case"],
+                    "ideology_integration_points": _join_request_values(workflow["integration_points"]),
+                    "ideology_teaching_goal": workflow["teaching_goal"],
+                    "ideology_reason": workflow["reason"],
+                    "ideology_search_needed": "1" if workflow["search_needed"] else "0",
+                    "ideology_search_queries": _join_request_values(workflow["search_queries"]),
+                },
             )
             results.append(item)
             continue
@@ -201,20 +237,41 @@ async def _stream_ai_result(
     result_item = ai_result_repo.get_result_item(result_id)
     course_name, hours, course_description, _ = _get_course_info(course_id)
     lesson_instruction = _build_lesson_plan_instruction(result_item.request_context) if output_type == "lesson_plan" else ""
+    ideology_instruction = _build_ideology_case_instruction(result_item.request_context) if output_type == "ideology_case" else ""
+    task_instruction = lesson_instruction or ideology_instruction
     lesson_root_nodes = _split_lesson_root_nodes(result_item.request_context.get("lesson_root_nodes", "")) if output_type == "lesson_plan" else []
     if lesson_instruction:
         yield f"data: {json.dumps({'status': 'agentic', 'message': '教案任务拆解完成'}, ensure_ascii=False)}\n\n"
-    rag_query = _build_generation_query(output_type, course_name, course_description, user_guidance, lesson_instruction)
+    if ideology_instruction:
+        yield f"data: {json.dumps({'status': 'agentic', 'message': '思政案例选题与检索计划完成'}, ensure_ascii=False)}\n\n"
+    rag_query = _build_generation_query(output_type, course_name, course_description, user_guidance, task_instruction)
     knowledge_md = await _build_knowledge_markdown(course_id, rag_query, lesson_root_nodes)
-    outline_reference = _load_outline_reference(course_id) if output_type == "lesson_plan" else ""
+    outline_reference = _load_outline_reference(course_id) if output_type in {"lesson_plan", "ideology_case"} else ""
+    if output_type == "ideology_case" and not outline_reference:
+        error_message = "请先生成并完成课程大纲，再创建思政案例"
+        ai_result_repo.mark_failed(result_id, error_message)
+        yield f"data: {json.dumps({'status': 'failed', 'error': error_message}, ensure_ascii=False)}\n\n"
+        return
     if outline_reference:
         yield f"data: {json.dumps({'status': 'outline_ready'}, ensure_ascii=False)}\n\n"
+    external_context = ""
+    if output_type == "ideology_case" and _request_bool(result_item.request_context.get("ideology_search_needed")):
+        search_queries = _split_request_values(result_item.request_context.get("ideology_search_queries", ""))
+        if search_queries:
+            yield f"data: {json.dumps({'status': 'searching'}, ensure_ascii=False)}\n\n"
+            search_context = await build_web_search_context(search_queries)
+            external_context = search_context.get("markdown", "")
+            if external_context:
+                yield f"data: {json.dumps({'status': 'search_ready'}, ensure_ascii=False)}\n\n"
+            else:
+                logger.warning("思政案例联网补充为空 | result={} | errors={}", result_id, search_context.get("errors", []))
     logger.info(
-        "生成开始 | result={} | course={} | type={} | knowledge_len={} | guidance_len={}",
+        "生成开始 | result={} | course={} | type={} | knowledge_len={} | external_len={} | guidance_len={}",
         result_id,
         course_id,
         output_type,
         len(knowledge_md),
+        len(external_context),
         len(user_guidance),
     )
 
@@ -227,6 +284,9 @@ async def _stream_ai_result(
             course_description=course_description,
             knowledge_content=knowledge_md,
             user_guidance=user_guidance,
+            task_instruction=task_instruction,
+            outline_reference=outline_reference,
+            external_context=external_context,
         )
         strategy_chunks: list[str] = []
         async for chunk in stream_chat(strategy_prompt):
@@ -259,8 +319,9 @@ async def _stream_ai_result(
                 knowledge_content=knowledge_md,
                 strategy_content=strategy_content,
                 user_guidance=user_guidance,
-                lesson_plan_instruction=lesson_instruction,
+                task_instruction=task_instruction,
                 outline_reference=outline_reference,
+                external_context=external_context,
             )
 
         logger.info(
@@ -302,9 +363,9 @@ def _build_generation_query(
     course_name: str,
     course_description: str,
     user_guidance: str,
-    lesson_instruction: str = "",
+    task_instruction: str = "",
 ) -> str:
-    extra = f"\n教案任务：{lesson_instruction}" if lesson_instruction else ""
+    extra = f"\n任务约束：{task_instruction}" if task_instruction else ""
     return f"{output_type} {course_name}\n课程简介：{course_description}\n教师补充方向：{user_guidance}{extra}"
 
 
@@ -415,6 +476,22 @@ def _parse_positive_int(raw: str | None) -> int | None:
         return None
 
 
+def _request_bool(raw: str | None) -> bool:
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _join_request_values(values: list[str]) -> str:
+    return "||".join(item.strip() for item in values if item.strip())
+
+
+def _split_request_values(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+    return [item.strip() for item in raw.split("||") if item.strip()]
+
+
 def _detect_lesson_plan_intent_by_text(user_guidance: str) -> tuple[str | None, int | None, bool]:
     text = user_guidance.strip()
     if not text:
@@ -460,6 +537,12 @@ def _build_lesson_plan_title(index: int, count: int, topic: str) -> str:
     if topic:
         return f"教案设计（第{index}/{count}篇：{topic}）"
     return f"教案设计（第{index}/{count}篇）"
+
+
+def _build_ideology_case_title(topic: str) -> str:
+    if topic:
+        return f"思政案例（{topic}）"
+    return "思政案例"
 
 
 async def _plan_lesson_plan_workflow(
@@ -534,6 +617,73 @@ async def _plan_lesson_plan_workflow(
         "topics": topics,
         "reason": reason,
         "explicit": explicit or scope != "auto",
+    }
+
+
+async def _plan_ideology_case_workflow(
+    course_name: str,
+    course_description: str,
+    outline_reference: str,
+    user_guidance: str,
+) -> dict[str, Any]:
+    prompt = f"""你是课程思政案例编排助手。请基于课程大纲，先完成一次 Agentic 选题与检索规划。
+只输出 JSON：
+{{
+  "topic": "本次思政案例主题",
+  "outline_case": "来自课程大纲的案例名称或对应栏目",
+  "integration_points": ["需要融入的知识点或教学环节"],
+  "teaching_goal": "一句话说明本次案例的育人目标",
+  "reason": "一句话说明为何选择这个案例",
+  "search_needed": true,
+  "search_queries": ["联网搜索主题1", "联网搜索主题2"]
+}}
+规则：
+1) 必须优先具体化课程大纲中已经出现或明确暗示的思政案例，不要脱离大纲另起主题
+2) 若大纲中的案例名称过于抽象，可将其细化为更可执行的课堂案例主题
+3) 仅当大纲缺少事实背景、真实事迹、政策依据、典型数据或权威表述时，search_needed 才为 true
+4) search_queries 最多 3 条，面向权威公开信源，便于补充事实背景
+5) integration_points 只保留 2-4 条最关键内容
+
+课程名称：{course_name}
+课程简介：{course_description or '（暂无）'}
+教师补充方向：{user_guidance or '（无）'}
+
+课程大纲：
+{outline_reference[:10000]}
+"""
+    try:
+        raw = await chat_once(prompt, temperature=0.1, stage="ideology_case_workflow")
+        parsed = _parse_json_object(raw)
+        integration_points_raw = parsed.get("integration_points")
+        search_queries_raw = parsed.get("search_queries")
+        integration_points = []
+        if isinstance(integration_points_raw, list):
+            integration_points = [str(item).strip() for item in integration_points_raw if str(item).strip()][:4]
+        search_queries = []
+        if isinstance(search_queries_raw, list):
+            search_queries = [str(item).strip() for item in search_queries_raw if str(item).strip()][:3]
+        search_needed = bool(parsed.get("search_needed"))
+        if search_needed and not search_queries:
+            search_queries = [f"{course_name} 思政案例 官方", f"{course_name} 课程思政 典型案例"]
+        return {
+            "topic": str(parsed.get("topic", "")).strip() or "课程思政案例深化",
+            "outline_case": str(parsed.get("outline_case", "")).strip(),
+            "integration_points": integration_points,
+            "teaching_goal": str(parsed.get("teaching_goal", "")).strip(),
+            "reason": str(parsed.get("reason", "")).strip() or "依据课程大纲中的思政案例线索进行深化",
+            "search_needed": search_needed,
+            "search_queries": search_queries,
+        }
+    except Exception as exc:
+        logger.warning("思政案例 Agentic 判定失败，使用兜底规划 | err={}", exc)
+    return {
+        "topic": "课程思政案例深化",
+        "outline_case": "",
+        "integration_points": [],
+        "teaching_goal": "",
+        "reason": "未能从大纲稳定抽取案例，使用通用深化流程",
+        "search_needed": bool(user_guidance.strip()),
+        "search_queries": [f"{course_name} 课程思政 官方案例"] if user_guidance.strip() else [],
     }
 
 
@@ -702,6 +852,29 @@ def _build_lesson_plan_instruction(request_context: dict[str, str]) -> str:
         lines.append(f"关键内容建议：{key_points}")
     if reason:
         lines.append(f"判定依据：{reason}")
+    return "\n".join(lines)
+
+
+def _build_ideology_case_instruction(request_context: dict[str, str]) -> str:
+    topic = request_context.get("ideology_topic", "").strip()
+    outline_case = request_context.get("ideology_outline_case", "").strip()
+    integration_points = _split_request_values(request_context.get("ideology_integration_points", ""))
+    teaching_goal = request_context.get("ideology_teaching_goal", "").strip()
+    reason = request_context.get("ideology_reason", "").strip()
+    search_queries = _split_request_values(request_context.get("ideology_search_queries", ""))
+    lines: list[str] = []
+    if topic:
+        lines.append(f"本次案例主题：{topic}")
+    if outline_case:
+        lines.append(f"大纲来源案例：{outline_case}")
+    if integration_points:
+        lines.append(f"重点融入环节：{'；'.join(integration_points)}")
+    if teaching_goal:
+        lines.append(f"育人目标：{teaching_goal}")
+    if reason:
+        lines.append(f"选题依据：{reason}")
+    if _request_bool(request_context.get('ideology_search_needed')) and search_queries:
+        lines.append(f"建议联网补充主题：{'；'.join(search_queries)}")
     return "\n".join(lines)
 
 

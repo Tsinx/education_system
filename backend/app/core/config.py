@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     dashscope_model: str = "qwen3.5-plus"
     dashscope_embedding_model: str = "text-embedding-v4"
     dashscope_rerank_model: str = "qwen3-rerank"
+    bigmodel_mcp_api_key: str = ""
+    bigmodel_mcp_search_url: str = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+    bigmodel_mcp_reader_url: str = "https://open.bigmodel.cn/api/mcp/web_reader/mcp"
+    bigmodel_mcp_timeout_s: int = 60
     rag_embedding_provider: str = "local"
     rag_rerank_provider: str = "local"
     local_embedding_model: str = "BAAI/bge-m3"

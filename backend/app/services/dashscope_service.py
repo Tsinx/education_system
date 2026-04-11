@@ -440,8 +440,11 @@ def build_generation_strategy_prompt(
     course_description: str,
     knowledge_content: str,
     user_guidance: str = "",
+    task_instruction: str = "",
+    outline_reference: str = "",
+    external_context: str = "",
 ) -> str:
-    return f"""你是一位高校课程设计顾问。请先不要直接生成最终文稿，而是先为课程产出一份“教学设计策略”。
+    prompt = f"""你是一位高校课程设计顾问。请先不要直接生成最终文稿，而是先为课程产出一份“教学设计策略”。
 
 你的任务是根据课程基本信息、知识库和教师补充方向，分析这门课更适合采用哪些教学理念、方法和组织方式。
 
@@ -498,6 +501,13 @@ def build_generation_strategy_prompt(
 课程知识库：
 {knowledge_content}
 """
+    if task_instruction:
+        prompt += f"\n\n本次任务约束：\n{task_instruction}"
+    if outline_reference:
+        prompt += f"\n\n可参考的既有课程大纲：\n{outline_reference}"
+    if external_context:
+        prompt += f"\n\n联网补充资料（需甄别吸收，不可照搬）：\n{external_context}"
+    return prompt
 
 
 def build_artifact_prompt(
@@ -508,8 +518,9 @@ def build_artifact_prompt(
     knowledge_content: str,
     strategy_content: str,
     user_guidance: str = "",
-    lesson_plan_instruction: str = "",
+    task_instruction: str = "",
     outline_reference: str = "",
+    external_context: str = "",
 ) -> str:
     output_label_map = {
         "outline": "课程教学大纲",
@@ -523,7 +534,7 @@ def build_artifact_prompt(
         "outline": """请严格参考示例结构输出，至少包含：基本信息、课程简介、教学目标、教学内容和方法、课程考核及成绩评定。""",
         "teaching_plan": """请输出可直接用于学期实施的教学计划，至少包含：总体安排、周次/课次安排表、教学重点难点、教学活动设计、考核安排、资源建议。""",
         "lesson_plan": """请输出可直接上课使用的教案设计，至少包含：课题、学情分析、教学目标、重难点、教学准备、教学过程、板书设计、作业与反思。""",
-        "ideology_case": """请输出课程思政案例方案，至少包含：案例主题、融入知识点、育人目标、教学实施步骤、课堂互动问题、评价方式、风险提醒。""",
+        "ideology_case": """请输出课程思政案例方案，至少包含：案例主题、融入知识点、育人目标、案例背景、教学实施步骤、课堂互动问题、评价方式、风险提醒、参考来源。请优先具体化课程大纲中已出现或隐含的思政案例，不要另起炉灶。""",
         "knowledge": """请输出课程知识库文档，至少包含：课程知识体系总览、按章节组织的知识点树、关键概念解释、前置/后置/关联知识说明、学习建议。""",
     }
     template_reference = ""
@@ -556,10 +567,12 @@ def build_artifact_prompt(
 """
     if template_reference:
         prompt += f"\n\n教案模板参考（来自 external_material/教案设计模板.docx）：\n{template_reference}"
-    if lesson_plan_instruction:
-        prompt += f"\n\n本次教案任务约束：\n{lesson_plan_instruction}"
+    if task_instruction:
+        prompt += f"\n\n本次任务约束：\n{task_instruction}"
     if outline_reference:
         prompt += f"\n\n可参考的既有课程大纲：\n{outline_reference}"
+    if external_context:
+        prompt += f"\n\n联网补充资料（需甄别吸收，不可照搬）：\n{external_context}"
     return prompt
 
 

@@ -39,6 +39,7 @@ import {
   Divider,
   Popconfirm,
 } from 'antd'
+import axios from 'axios'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   addChapter,
@@ -259,6 +260,13 @@ export function CourseDetailPage() {
   }
 
   const handleOpenGenerationModal = (outputType: AiOutputType) => {
+    if (outputType === 'ideology_case') {
+      const hasCompletedOutline = aiResults.some((item) => item.output_type === 'outline' && item.status === 'done')
+      if (!hasCompletedOutline) {
+        messageApi.warning('请先生成并完成课程大纲，再创建思政案例')
+        return
+      }
+    }
     setSelectedOutputType(outputType)
     setGenerationGuidance('')
     setLessonPlanScope('auto')
@@ -313,8 +321,9 @@ export function CourseDetailPage() {
         messageApi.success(`已提交「${results[0].title}」生成任务`)
       }
       results.forEach((r) => startStreaming(r.id))
-    } catch {
-      messageApi.error('提交生成任务失败')
+    } catch (error) {
+      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined
+      messageApi.error(typeof detail === 'string' && detail ? detail : '提交生成任务失败')
     } finally {
       setGenerating((prev) => ({ ...prev, [outputType]: false }))
     }
@@ -398,6 +407,16 @@ export function CourseDetailPage() {
         if (payload.status === 'outline_ready') {
           appendLlmTrace(`任务「${resultTitle}」已关联历史大纲`)
           setTaskStageMap((prev) => ({ ...prev, [resultId]: '前置阶段：已关联历史大纲' }))
+          return
+        }
+        if (payload.status === 'searching') {
+          appendLlmTrace(`任务「${resultTitle}」进入阶段：联网检索补充`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: '前置阶段：联网检索补充' }))
+          return
+        }
+        if (payload.status === 'search_ready') {
+          appendLlmTrace(`任务「${resultTitle}」已完成联网资料补充`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: '前置阶段：已补充外部资料' }))
           return
         }
         if (payload.status === 'drafting') {
@@ -591,6 +610,7 @@ export function CourseDetailPage() {
 
   const activeTasks = aiResults.filter((r) => r.status === 'running' || r.status === 'queued')
   const completedTasks = aiResults.filter((r) => r.status === 'done')
+  const hasCompletedOutline = aiResults.some((item) => item.output_type === 'outline' && item.status === 'done')
 
   return (
     <>
@@ -746,6 +766,7 @@ export function CourseDetailPage() {
                     type="primary"
                     icon={btn.icon}
                     loading={generating[btn.key]}
+                    disabled={btn.key === 'ideology_case' && !hasCompletedOutline}
                     onClick={() => handleOpenGenerationModal(btn.key)}
                     size="large"
                   >
@@ -753,6 +774,12 @@ export function CourseDetailPage() {
                   </Button>
                 ))}
               </div>
+
+              {!hasCompletedOutline && (
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                  思政案例依赖已完成的课程大纲，请先生成课程大纲。
+                </Typography.Text>
+              )}
 
               <Divider style={{ margin: '16px 0' }} />
 
