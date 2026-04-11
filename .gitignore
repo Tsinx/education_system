@@ -1,0 +1,50 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Root temp
+_tmp_openrouter_test/
+_tmp_openrouter_minimax_test.mjs
+*.log
+external_material/
+test_export.docx
+test_summary.txt
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Python (backend)
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyc*
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/build/
+backend/dist/
+backend/*.egg-info/
+backend/data/
+backend/materials.db
+backend/dev_backend.err.log
+backend/dev_backend.out.log
+backend/run_e2e_observe.err.log
+backend/run_e2e_observe.out.log
+backend/e2e_frontend_report_*.json
+backend/.python-version
+backend/.git_backend_backup_*/
+
+# Node (frontend)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/dev_frontend.err.log
+frontend/dev_frontend.out.log
+
+# Generic caches
+**/__pycache__/
+**/.cache/
+*.tmp

@@ -1,0 +1,23 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Education System AI Agent - Backend"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "python-multipart",
+    "markitdown[all]",
+    "openpyxl",
+    "pypandoc",
+    "httpx",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "transformers",
+    "sentence-transformers",
+    "FlagEmbedding",
+    "huggingface_hub",
+]
