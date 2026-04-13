@@ -33,7 +33,7 @@
 
 ## 生成（generation）
 
-- `POST /generation/start`
+- `POST /generation/start`：支持 `exercise_requirements`、`selected_knowledge_ids`，用于习题生成
 - `GET /generation/stream/{result_id}`
 - `GET /generation/results`
 - `GET /generation/results/{result_id}`
@@ -55,3 +55,4 @@
 
 - 实际请求/响应结构请以 Swagger：`/docs` 为准。
 - 导出接口返回二进制文件（Excel/Docx），前端需要以 `blob` 方式处理。
+

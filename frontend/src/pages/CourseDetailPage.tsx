@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeftOutlined,
   BookOutlined,
@@ -38,6 +38,7 @@ import {
   message,
   Divider,
   Popconfirm,
+  Tree,
 } from 'antd'
 import axios from 'axios'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -50,13 +51,14 @@ import {
   fetchAiResults,
   fetchChapters,
   fetchCourses,
+  fetchCourseKnowledgeGraph,
   deleteMaterial,
   fetchMaterialDetail,
   startAiGeneration,
   refineCourseKnowledgeGraph,
 } from '../api/client'
 import { useConversionQueue } from '../hooks/useConversionQueue'
-import type { AiOutputType, AiResultItem, Chapter, Course } from '../types'
+import type { AiOutputType, AiResultItem, Chapter, Course, CourseKnowledgeGraph } from '../types'
 
 const statusColorMap: Record<string, string> = {
   queued: '#999',
@@ -146,6 +148,9 @@ export function CourseDetailPage() {
   const [generationGuidance, setGenerationGuidance] = useState('')
   const [lessonPlanScope, setLessonPlanScope] = useState<LessonPlanScope>('auto')
   const [lessonPlanCount, setLessonPlanCount] = useState(2)
+  const [exerciseKnowledgeGraph, setExerciseKnowledgeGraph] = useState<CourseKnowledgeGraph | null>(null)
+  const [exerciseKnowledgeLoading, setExerciseKnowledgeLoading] = useState(false)
+  const [checkedKnowledgeIds, setCheckedKnowledgeIds] = useState<string[]>([])
 
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewContent, setPreviewContent] = useState('')
@@ -182,6 +187,20 @@ export function CourseDetailPage() {
     fetchChapters(courseId).then(setChapters)
     fetchAiResults(courseId).then(setAiResults).catch(() => {})
   }, [courseId])
+  const loadExerciseKnowledgeGraph = useCallback(async () => {
+    if (!courseId) return
+    setExerciseKnowledgeLoading(true)
+    try {
+      const data = await fetchCourseKnowledgeGraph(courseId)
+      setExerciseKnowledgeGraph(data)
+    } catch {
+      setExerciseKnowledgeGraph(null)
+      messageApi.error('加载知识点树失败')
+    } finally {
+      setExerciseKnowledgeLoading(false)
+    }
+  }, [courseId, messageApi])
+
 
   const handleAddChapter = async () => {
     const trimmed = newTitle.trim()
@@ -271,6 +290,13 @@ export function CourseDetailPage() {
     setGenerationGuidance('')
     setLessonPlanScope('auto')
     setLessonPlanCount(2)
+    setCheckedKnowledgeIds([])
+    if (outputType === 'exercise') {
+      void loadExerciseKnowledgeGraph()
+    } else {
+      setExerciseKnowledgeGraph(null)
+      setExerciseKnowledgeLoading(false)
+    }
     setGenerationModalOpen(true)
   }
 
@@ -312,6 +338,8 @@ export function CourseDetailPage() {
       const results = await startAiGeneration(courseId, [outputType], userGuidance, {
         lesson_plan_scope: outputType === 'lesson_plan' ? submitScope : undefined,
         lesson_count: outputType === 'lesson_plan' ? submitCount : undefined,
+        exercise_requirements: outputType === 'exercise' ? userGuidance : undefined,
+        selected_knowledge_ids: outputType === 'exercise' ? checkedKnowledgeIds : undefined,
       })
       setAiResults((prev) => [...results, ...prev])
       setGenerationModalOpen(false)
@@ -395,13 +423,15 @@ export function CourseDetailPage() {
           return
         }
         if (payload.status === 'planning') {
-          appendLlmTrace(`任务「${resultTitle}」进入阶段：教学策略推演`)
-          setTaskStageMap((prev) => ({ ...prev, [resultId]: '阶段 1：教学策略推演' }))
+          const stageText = typeof payload.message === 'string' && payload.message ? payload.message : 'Stage 1: planning'
+          appendLlmTrace(`任务「${resultTitle}」进入阶段：${stageText}`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: stageText }))
           return
         }
         if (payload.status === 'agentic') {
-          appendLlmTrace(`任务「${resultTitle}」进入阶段：Agentic 编排`)
-          setTaskStageMap((prev) => ({ ...prev, [resultId]: '前置阶段：Agentic 任务编排' }))
+          const stageText = typeof payload.message === 'string' && payload.message ? payload.message : 'Agentic preparation'
+          appendLlmTrace(`任务「${resultTitle}」进入阶段：${stageText}`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: stageText }))
           return
         }
         if (payload.status === 'outline_ready') {
@@ -420,8 +450,15 @@ export function CourseDetailPage() {
           return
         }
         if (payload.status === 'drafting') {
-          appendLlmTrace(`任务「${resultTitle}」进入阶段：文稿生成`)
-          setTaskStageMap((prev) => ({ ...prev, [resultId]: '阶段 2：文稿生成' }))
+          const stageText = typeof payload.message === 'string' && payload.message ? payload.message : 'Stage 2: drafting'
+          appendLlmTrace(`任务「${resultTitle}」进入阶段：${stageText}`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: stageText }))
+          return
+        }
+        if (payload.status === 'python') {
+          const stageText = typeof payload.message === 'string' && payload.message ? payload.message : 'Stage 3: Python verification'
+          appendLlmTrace(`任务「${resultTitle}」进入阶段：${stageText}`)
+          setTaskStageMap((prev) => ({ ...prev, [resultId]: stageText }))
           return
         }
         if (payload.status === 'failed') {
@@ -594,10 +631,13 @@ export function CourseDetailPage() {
     { key: 'outline' as AiOutputType, label: '生成课程大纲', icon: <FileTextOutlined /> },
     { key: 'lesson_plan' as AiOutputType, label: '生成教案设计', icon: <EditOutlined /> },
     { key: 'teaching_plan' as AiOutputType, label: '生成教学计划', icon: <CalendarOutlined /> },
+    { key: 'exercise' as AiOutputType, label: '生成课堂习题', icon: <FileMarkdownOutlined /> },
     { key: 'ideology_case' as AiOutputType, label: '生成思政案例', icon: <BookOutlined /> },
     { key: 'knowledge' as AiOutputType, label: '更新知识库', icon: <FileProtectOutlined /> },
   ]
-  const guidancePresets = ['PBL 项目式学习', 'OBE 成果导向', 'BOPPPS', '布鲁姆目标分类', '翻转课堂', '混合式教学', '案例教学', 'ISW']
+  const guidancePresets = ['PBL', 'OBE', 'BOPPPS', '布鲁姆目标分类', '翻转课堂', '混合式教学', '案例教学', 'ISW']
+  const exerciseGuidancePresets = ['4道单选 + 2道计算', '突出高频易错点', '偏基础巩固', '偏综合应用', '课堂快测 10 分钟', '附详细解析']
+  const activeGuidancePresets = selectedOutputType === 'exercise' ? exerciseGuidancePresets : guidancePresets
   const lessonIntent = detectLessonPlanIntent(generationGuidance)
   const semesterCount = resolveSemesterLessonCount(course?.sessions, course?.hours)
   const lessonScopeLabelMap: Record<LessonPlanScope, string> = {
@@ -607,6 +647,48 @@ export function CourseDetailPage() {
     semester: '整学期',
   }
   const autoScopeLabel = lessonScopeLabelMap[lessonIntent.scope]
+  const exerciseKnowledgeTreeData = useMemo(() => {
+    if (!exerciseKnowledgeGraph?.nodes?.length) return []
+    const nodeById = new Map(exerciseKnowledgeGraph.nodes.map((node) => [node.id, node]))
+    const childrenByParentId = new Map<string, CourseKnowledgeGraph['nodes']>()
+    exerciseKnowledgeGraph.edges
+      .filter((edge) => edge.type === 'hierarchy')
+      .forEach((edge) => {
+        const child = nodeById.get(edge.target)
+        if (!child) return
+        const next = childrenByParentId.get(edge.source) ?? []
+        next.push(child)
+        childrenByParentId.set(edge.source, next)
+      })
+
+    const buildNode = (node: CourseKnowledgeGraph['nodes'][number]): any => ({
+      title: `${node.label} (L${node.level})`,
+      key: node.id,
+      children: (childrenByParentId.get(node.id) ?? [])
+        .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
+        .map((child) => buildNode(child)),
+    })
+
+    const chapters = exerciseKnowledgeGraph.chapters.length > 0
+      ? exerciseKnowledgeGraph.chapters
+      : Array.from(new Set(exerciseKnowledgeGraph.nodes.map((node) => node.chapter)))
+
+    return chapters
+      .map((chapter) => {
+        const chapterNodes = exerciseKnowledgeGraph.nodes.filter((node) => node.chapter === chapter)
+        const roots = chapterNodes.filter(
+          (node) => !node.parent_name || !chapterNodes.some((candidate) => candidate.label === node.parent_name),
+        )
+        return {
+          title: `${chapter} (${chapterNodes.length})`,
+          key: `chapter:${chapter}`,
+          disableCheckbox: true,
+          selectable: false,
+          children: roots.map((node) => buildNode(node)),
+        }
+      })
+      .filter((item) => item.children.length > 0)
+  }, [exerciseKnowledgeGraph])
 
   const activeTasks = aiResults.filter((r) => r.status === 'running' || r.status === 'queued')
   const completedTasks = aiResults.filter((r) => r.status === 'done')
@@ -1014,16 +1096,18 @@ export function CourseDetailPage() {
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            教师可选填一些生成方向。系统会先用第一阶段模型推演教学组织方式、教育理念与方法，再进入第二阶段正式生成文稿。
+            {selectedOutputType === 'exercise'
+              ? '教师可输入习题要求，并勾选本次命题覆盖的知识点。系统会先分析高频易错点，再生成题目、答案解析，并对选择题打乱选项、对计算题执行 Python 校验。'
+              : '教师可选填一些生成方向。系统会先进行规划，再生成最终教学产物。'}
           </Typography.Paragraph>
-          <Typography.Text strong>推荐方向</Typography.Text>
+          <Typography.Text strong>{selectedOutputType === 'exercise' ? '推荐要求' : '推荐方向'}</Typography.Text>
           <Space wrap>
-            {guidancePresets.map((preset) => (
+            {activeGuidancePresets.map((preset) => (
               <Button
                 key={preset}
                 size="small"
                 onClick={() =>
-                  setGenerationGuidance((prev) => (prev.includes(preset) ? prev : `${prev}${prev ? '；' : ''}${preset}`))
+                  setGenerationGuidance((prev) => (prev.includes(preset) ? prev : `${prev}${prev ? '; ' : ''}${preset}`))
                 }
               >
                 {preset}
@@ -1034,11 +1118,49 @@ export function CourseDetailPage() {
             rows={6}
             value={generationGuidance}
             onChange={(e) => setGenerationGuidance(e.target.value)}
-            placeholder="例如：希望更突出项目式学习、物流行业案例、线上线下混合教学，课堂活动更强调小组协作与过程性评价。"
+            placeholder={selectedOutputType === 'exercise'
+              ? '例如：生成 4 道单选、2 道计算；重点考查易错点；难度控制在课堂测验水平；给出详细解析。'
+              : '例如：希望更突出项目式学习、物流行业案例、线上线下混合教学，课堂活动更强调小组协作与过程性评价。'}
           />
           <Typography.Text type="secondary">
             系统会同时参考课程已记录的课时、简介、已构建知识库与知识图谱。
           </Typography.Text>
+          {selectedOutputType === 'exercise' && (
+            <>
+              <Divider style={{ margin: '8px 0' }} />
+              <Typography.Text strong>知识点范围</Typography.Text>
+              <Typography.Text type="secondary">
+                {checkedKnowledgeIds.length} 个知识点；若不勾选，将按整门课程已有知识范围生成。
+              </Typography.Text>
+              <div
+                style={{
+                  maxHeight: 260,
+                  overflow: 'auto',
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 10,
+                  padding: 12,
+                  background: '#fafafa',
+                }}
+              >
+                {exerciseKnowledgeLoading ? (
+                  <Typography.Text type="secondary">正在加载知识点树...</Typography.Text>
+                ) : exerciseKnowledgeTreeData.length > 0 ? (
+                  <Tree
+                    checkable
+                    defaultExpandAll
+                    treeData={exerciseKnowledgeTreeData}
+                    checkedKeys={checkedKnowledgeIds}
+                    onCheck={(checked) => {
+                      const keys = Array.isArray(checked) ? checked : checked.checked
+                      setCheckedKnowledgeIds(keys.map((item) => String(item)).filter((item) => !item.startsWith('chapter:')))
+                    }}
+                  />
+                ) : (
+                  <Typography.Text type="secondary">当前课程暂无可选知识点，可直接按文本要求生成习题。</Typography.Text>
+                )}
+              </div>
+            </>
+          )}
           {selectedOutputType === 'lesson_plan' && (
             <>
               <Divider style={{ margin: '8px 0' }} />
@@ -1063,9 +1185,9 @@ export function CourseDetailPage() {
               )}
               {lessonPlanScope === 'auto' && (
                 <Typography.Text type="secondary">
-                  自动判断结果：{autoScopeLabel}
-                  {lessonIntent.scope === 'multiple' && lessonIntent.count ? `（${lessonIntent.count} 篇）` : ''}
-                  {lessonIntent.scope === 'semester' ? `（约 ${semesterCount} 篇）` : ''}；{lessonIntent.reason}
+                  自动判断 detection: {autoScopeLabel}
+                  {lessonIntent.scope === 'multiple' && lessonIntent.count ? ` (${lessonIntent.count})` : ''}
+                  {lessonIntent.scope === 'semester' ? `（约 ${semesterCount} 篇）` : ''}; {lessonIntent.reason}
                 </Typography.Text>
               )}
               {lessonPlanScope === 'semester' && (
@@ -1102,3 +1224,13 @@ export function CourseDetailPage() {
     </>
   )
 }
+
+
+
+
+
+
+
+
+
+

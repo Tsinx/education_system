@@ -24,6 +24,13 @@ from app.services.dashscope_service import (
     stream_chat,
 )
 from app.services.bigmodel_mcp_service import build_web_search_context
+from app.services.exercise_generation_service import (
+    analyze_exercise_requirements,
+    build_exercise_knowledge_context,
+    draft_exercise_questions,
+    finalize_exercise_questions,
+    render_exercise_markdown,
+)
 from app.services.local_retrieval_service import retrieve_course_chunks_local
 from app.services.material_pipeline import ai_result_repo, repository
 
@@ -45,12 +52,28 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
     )
     for output_type in payload.output_types:
         label = AiOutputLabel.get(output_type, output_type)
-        if output_type not in {"lesson_plan", "ideology_case"}:
+        if output_type not in {"lesson_plan", "ideology_case", "exercise"}:
             item = ai_result_repo.create_result(
                 course_id=payload.course_id,
                 output_type=output_type,
                 title=label,
                 request_context={"user_guidance": user_guidance},
+            )
+            results.append(item)
+            continue
+        if output_type == "exercise":
+            exercise_requirements = payload.exercise_requirements.strip() or user_guidance
+            exercise_context = build_exercise_knowledge_context(payload.course_id, payload.selected_knowledge_ids)
+            item = ai_result_repo.create_result(
+                course_id=payload.course_id,
+                output_type=output_type,
+                title=_build_exercise_title(exercise_context["selected_names"]),
+                request_context={
+                    "user_guidance": user_guidance,
+                    "exercise_requirements": exercise_requirements,
+                    "selected_knowledge_ids": _join_request_values(exercise_context["selected_ids"]),
+                    "selected_knowledge_names": _join_request_values(exercise_context["selected_names"]),
+                },
             )
             results.append(item)
             continue
@@ -236,6 +259,10 @@ async def _stream_ai_result(
 
     result_item = ai_result_repo.get_result_item(result_id)
     course_name, hours, course_description, _ = _get_course_info(course_id)
+    if output_type == "exercise":
+        async for event in _stream_exercise_result(result_id, course_id, course_name, course_description, result_item.request_context):
+            yield event
+        return
     lesson_instruction = _build_lesson_plan_instruction(result_item.request_context) if output_type == "lesson_plan" else ""
     ideology_instruction = _build_ideology_case_instruction(result_item.request_context) if output_type == "ideology_case" else ""
     task_instruction = lesson_instruction or ideology_instruction
@@ -343,6 +370,88 @@ async def _stream_ai_result(
     logger.info("生成完成 | result={} | course={} | type={}", result_id, course_id, output_type)
     yield f"data: {json.dumps({'status': 'done'}, ensure_ascii=False)}\n\n"
 
+
+async def _stream_exercise_result(
+    result_id: str,
+    course_id: str,
+    course_name: str,
+    course_description: str,
+    request_context: dict[str, str],
+) -> AsyncGenerator[str, None]:
+    exercise_requirements = request_context.get("exercise_requirements", "").strip() or request_context.get("user_guidance", "").strip()
+    selected_ids = _split_request_values(request_context.get("selected_knowledge_ids", ""))
+    exercise_context = build_exercise_knowledge_context(course_id, selected_ids)
+    selected_names = exercise_context["selected_names"]
+    knowledge_md = exercise_context["knowledge_markdown"]
+
+    try:
+        yield f"data: {json.dumps({'status': 'agentic', 'message': '阶段 1：分析知识点易错点'}, ensure_ascii=False)}\n\n"
+        analysis = await analyze_exercise_requirements(
+            course_name=course_name,
+            course_description=course_description,
+            exercise_requirements=exercise_requirements,
+            knowledge_markdown=knowledge_md,
+        )
+
+        yield f"data: {json.dumps({'status': 'planning', 'message': '阶段 2：生成题目与干扰项'}, ensure_ascii=False)}\n\n"
+        draft = await draft_exercise_questions(
+            course_name=course_name,
+            course_description=course_description,
+            exercise_requirements=exercise_requirements,
+            knowledge_markdown=knowledge_md,
+            analysis=analysis,
+        )
+        questions = draft.get("questions", []) if isinstance(draft, dict) else []
+        if not isinstance(questions, list) or not questions:
+            raise RuntimeError("未生成有效习题，请调整要求后重试")
+
+        has_python_verification = any(
+            (
+                str(item.get("python_check_goal", "")).strip()
+                or str(item.get("type", "")).strip() in {"calculation", "计算", "计算题"}
+            )
+            for item in questions
+            if isinstance(item, dict)
+        )
+        if has_python_verification:
+            yield f"data: {json.dumps({'status': 'python', 'message': '阶段 3：题目计算环节 Python 校验'}, ensure_ascii=False)}\n\n"
+        finalized_questions = await finalize_exercise_questions(questions, analysis)
+
+        yield f"data: {json.dumps({'status': 'drafting', 'message': '阶段 4：整理答案与解析'}, ensure_ascii=False)}\n\n"
+        markdown = render_exercise_markdown(
+            course_name=course_name,
+            exercise_requirements=exercise_requirements,
+            selected_names=selected_names,
+            analysis=analysis,
+            title=str(draft.get("title", "")).strip() if isinstance(draft, dict) else "",
+            overview=str(draft.get("overview", "")).strip() if isinstance(draft, dict) else "",
+            questions=finalized_questions,
+        )
+        for chunk in _chunk_text(markdown):
+            ai_result_repo.append_content(result_id, chunk)
+            yield f"data: {json.dumps({'chunk': chunk, 'stage': 'drafting'}, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        logger.exception("习题生成失败 | result={} | course={}", result_id, course_id)
+        ai_result_repo.mark_failed(result_id, str(exc))
+        yield f"data: {json.dumps({'status': 'failed', 'error': str(exc)}, ensure_ascii=False)}\n\n"
+        return
+
+    ai_result_repo.mark_done(result_id)
+    logger.info("习题生成完成 | result={} | course={} | selected_count={}", result_id, course_id, len(selected_names))
+    yield f"data: {json.dumps({'status': 'done'}, ensure_ascii=False)}\n\n"
+
+
+def _build_exercise_title(selected_names: list[str]) -> str:
+    if not selected_names:
+        return "习题生成"
+    head = "、".join(selected_names[:2])
+    if len(selected_names) > 2:
+        head += " 等"
+    return f"习题生成（{head}）"
+
+
+def _chunk_text(content: str, chunk_size: int = 120) -> list[str]:
+    return [content[index : index + chunk_size] for index in range(0, len(content), chunk_size)]
 
 def _gather_course_materials(course_id: str) -> str:
     parts: list[str] = []
@@ -909,3 +1018,6 @@ async def _stream_done(detail: AiResultDetail) -> AsyncGenerator[str, None]:
             yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.001)
     yield f"data: {json.dumps({'status': 'done'}, ensure_ascii=False)}\n\n"
+
+
+

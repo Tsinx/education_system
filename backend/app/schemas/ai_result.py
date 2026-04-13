@@ -1,9 +1,9 @@
-from datetime import datetime
+﻿from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-AiOutputType = Literal["outline", "knowledge", "teaching_plan", "ideology_case", "lesson_plan"]
+AiOutputType = Literal["outline", "knowledge", "teaching_plan", "ideology_case", "lesson_plan", "exercise"]
 
 AiOutputLabel: dict[AiOutputType, str] = {
     "outline": "课程大纲",
@@ -11,6 +11,7 @@ AiOutputLabel: dict[AiOutputType, str] = {
     "teaching_plan": "教学计划",
     "ideology_case": "思政案例",
     "lesson_plan": "教案设计",
+    "exercise": "习题生成",
 }
 
 
@@ -37,3 +38,5 @@ class AiGenerateRequest(BaseModel):
     user_guidance: str = ""
     lesson_plan_scope: Literal["auto", "single", "multiple", "semester"] = "auto"
     lesson_count: int | None = None
+    exercise_requirements: str = ""
+    selected_knowledge_ids: list[str] = Field(default_factory=list)

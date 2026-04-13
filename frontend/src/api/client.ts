@@ -1,4 +1,4 @@
-import axios from 'axios'
+﻿import axios from 'axios'
 import { mockChapters, mockCourses, mockKnowledgeSummary, mockProjects, mockTasks } from '../data/mock'
 import type {
   AiOutputType,
@@ -134,6 +134,8 @@ export async function startAiGeneration(
   options?: {
     lesson_plan_scope?: 'auto' | 'single' | 'multiple' | 'semester'
     lesson_count?: number
+    exercise_requirements?: string
+    selected_knowledge_ids?: string[]
   },
 ): Promise<AiResultItem[]> {
   const { data } = await api.post<AiResultItem[]>('/generation/start', {
@@ -142,6 +144,8 @@ export async function startAiGeneration(
     user_guidance: userGuidance,
     lesson_plan_scope: options?.lesson_plan_scope ?? 'auto',
     lesson_count: options?.lesson_count ?? null,
+    exercise_requirements: options?.exercise_requirements ?? '',
+    selected_knowledge_ids: options?.selected_knowledge_ids ?? [],
   })
   return data
 }
@@ -217,3 +221,5 @@ export async function exportCourseKnowledgeGraph(courseId: string) {
   })
   return response
 }
+
+

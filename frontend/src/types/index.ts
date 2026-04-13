@@ -1,4 +1,4 @@
-export type Course = {
+﻿export type Course = {
   id: string
   name: string
   description: string
@@ -65,7 +65,7 @@ export type MaterialDetail = MaterialItem & {
   error_message: string | null
 }
 
-export type AiOutputType = 'outline' | 'knowledge' | 'teaching_plan' | 'ideology_case' | 'lesson_plan'
+export type AiOutputType = 'outline' | 'knowledge' | 'teaching_plan' | 'ideology_case' | 'lesson_plan' | 'exercise'
 
 export type AiResultStatus = 'queued' | 'running' | 'done' | 'failed'
 
@@ -133,3 +133,4 @@ export type DeleteKnowledgePointResult = {
   promoted_count: number
   recursive: boolean
 }
+

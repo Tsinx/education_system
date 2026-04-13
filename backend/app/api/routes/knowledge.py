@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import io
 from pathlib import Path
 from typing import Iterable
@@ -21,6 +21,9 @@ class _ExportTopicRow:
     node_type: str
     level: int
     name: str
+    original_name: str
+    parent_name: str | None
+    chapter_name: str | None
     description: str | None
     prerequisite_points: list[str]
     postrequisite_points: list[str]
@@ -31,11 +34,16 @@ def _normalize_topic_name(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _point_to_export_row(level: int, point) -> _ExportTopicRow:
+def _point_to_export_row(level: int, point, has_children: bool = False) -> _ExportTopicRow:
+    node_type = "分类" if has_children else "知识点"
+    point_name = _normalize_topic_name(point.name)
     return _ExportTopicRow(
-        node_type="知识点",
+        node_type=node_type,
         level=max(1, min(7, level)),
-        name=point.name,
+        name=point_name,
+        original_name=point_name,
+        parent_name=_normalize_topic_name(point.parent_name) or None,
+        chapter_name=_normalize_topic_name(point.chapter_section) or None,
         description=point.description or None,
         prerequisite_points=list(point.prerequisite_points),
         postrequisite_points=list(point.postrequisite_points),
@@ -44,15 +52,126 @@ def _point_to_export_row(level: int, point) -> _ExportTopicRow:
 
 
 def _chapter_row(chapter_name: str, description: str | None = None) -> _ExportTopicRow:
+    normalized_chapter_name = _normalize_topic_name(chapter_name)
     return _ExportTopicRow(
         node_type="分类",
         level=1,
-        name=chapter_name,
-        description=description or f"{chapter_name}章节知识组织节点",
+        name=normalized_chapter_name,
+        original_name=normalized_chapter_name,
+        parent_name=None,
+        chapter_name=normalized_chapter_name or None,
+        description=description or f"{normalized_chapter_name}章节知识组织节点",
         prerequisite_points=[],
         postrequisite_points=[],
         related_points=[],
     )
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_topic_name(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _ensure_unique_export_names(rows: list[_ExportTopicRow]) -> list[_ExportTopicRow]:
+    if not rows:
+        return rows
+
+    indexes_by_name: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        indexes_by_name[_normalize_topic_name(row.name)].append(index)
+
+    proposed_names = [row.name for row in rows]
+    for base_name, indexes in indexes_by_name.items():
+        if not base_name or len(indexes) <= 1:
+            continue
+        for index in indexes:
+            row = rows[index]
+            prefix = _normalize_topic_name(row.parent_name) or _normalize_topic_name(row.chapter_name)
+            proposed_names[index] = f"{prefix}-{base_name}" if prefix else base_name
+
+    used_names: set[str] = set()
+    finalized_names: list[str] = []
+    for index, proposed_name in enumerate(proposed_names):
+        base = _normalize_topic_name(proposed_name) or f"节点{index + 1}"
+        candidate = base
+        suffix = 2
+        while candidate in used_names:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used_names.add(candidate)
+        finalized_names.append(candidate)
+
+    renamed_rows = [replace(row, name=finalized_names[index]) for index, row in enumerate(rows)]
+
+    by_original_name: dict[str, list[str]] = defaultdict(list)
+    by_parent_and_original: dict[tuple[str, str], list[str]] = defaultdict(list)
+    by_chapter_and_original: dict[tuple[str, str], list[str]] = defaultdict(list)
+
+    for row in renamed_rows:
+        original_name = _normalize_topic_name(row.original_name)
+        if not original_name:
+            continue
+        by_original_name[original_name].append(row.name)
+        parent_name = _normalize_topic_name(row.parent_name)
+        chapter_name = _normalize_topic_name(row.chapter_name)
+        if parent_name:
+            by_parent_and_original[(parent_name, original_name)].append(row.name)
+        if chapter_name:
+            by_chapter_and_original[(chapter_name, original_name)].append(row.name)
+
+    def resolve_relation_name(raw_name: str, source_row: _ExportTopicRow) -> str:
+        relation_name = _normalize_topic_name(raw_name)
+        if not relation_name:
+            return ""
+        direct_candidates = _dedupe_keep_order(by_original_name.get(relation_name, []))
+        if not direct_candidates:
+            return relation_name
+        if len(direct_candidates) == 1:
+            return direct_candidates[0]
+
+        source_parent = _normalize_topic_name(source_row.parent_name)
+        if source_parent:
+            parent_candidates = _dedupe_keep_order(
+                by_parent_and_original.get((source_parent, relation_name), [])
+            )
+            if len(parent_candidates) == 1:
+                return parent_candidates[0]
+
+        source_chapter = _normalize_topic_name(source_row.chapter_name)
+        if source_chapter:
+            chapter_candidates = _dedupe_keep_order(
+                by_chapter_and_original.get((source_chapter, relation_name), [])
+            )
+            if len(chapter_candidates) == 1:
+                return chapter_candidates[0]
+
+        return direct_candidates[0]
+
+    resolved_rows: list[_ExportTopicRow] = []
+    for row in renamed_rows:
+        resolved_rows.append(
+            replace(
+                row,
+                prerequisite_points=_dedupe_keep_order(
+                    [resolve_relation_name(name, row) for name in row.prerequisite_points]
+                ),
+                postrequisite_points=_dedupe_keep_order(
+                    [resolve_relation_name(name, row) for name in row.postrequisite_points]
+                ),
+                related_points=_dedupe_keep_order(
+                    [resolve_relation_name(name, row) for name in row.related_points]
+                ),
+            )
+        )
+
+    return resolved_rows
 
 
 def _sort_points_for_export(points: list) -> list[_ExportTopicRow]:
@@ -108,8 +227,10 @@ def _sort_points_for_export(points: list) -> list[_ExportTopicRow]:
                 if node.id in visited_ids:
                     continue
                 visited_ids.add(node.id)
-                export_rows.append(_point_to_export_row(level, node))
                 child_nodes = order_children(children_by_parent.get(_normalize_topic_name(node.name), []), node)
+                # 学习通模板约束：知识点节点不支持子级。
+                # 因此导出时将“有子节点”的节点强制标记为分类节点，叶子节点标记为知识点。
+                export_rows.append(_point_to_export_row(level, node, has_children=len(child_nodes) > 0))
                 walk(child_nodes, level + 1)
 
         if chapter_root is not None:
@@ -127,7 +248,7 @@ def _sort_points_for_export(points: list) -> list[_ExportTopicRow]:
             remaining_points.sort(key=lambda item: (index_by_id[item.id], item.level, _normalize_topic_name(item.name)))
             walk(remaining_points, 2 if chapter_name else 1)
 
-    return export_rows
+    return _ensure_unique_export_names(export_rows)
 
 
 @router.get("/summary")
