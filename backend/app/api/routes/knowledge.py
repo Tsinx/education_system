@@ -18,6 +18,7 @@ _TOPIC_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "assets" / "importT
 
 @dataclass(frozen=True)
 class _ExportTopicRow:
+    node_type: str
     level: int
     name: str
     description: str | None
@@ -32,6 +33,7 @@ def _normalize_topic_name(value: str | None) -> str:
 
 def _point_to_export_row(level: int, point) -> _ExportTopicRow:
     return _ExportTopicRow(
+        node_type="知识点",
         level=max(1, min(7, level)),
         name=point.name,
         description=point.description or None,
@@ -43,6 +45,7 @@ def _point_to_export_row(level: int, point) -> _ExportTopicRow:
 
 def _chapter_row(chapter_name: str, description: str | None = None) -> _ExportTopicRow:
     return _ExportTopicRow(
+        node_type="分类",
         level=1,
         name=chapter_name,
         description=description or f"{chapter_name}章节知识组织节点",
@@ -297,16 +300,18 @@ def export_course_knowledge_graph(course_id: str) -> StreamingResponse:
 
     # Keep template instructions/header rows and rewrite rows from row 3.
     for row_idx in range(3, sheet.max_row + 1):
-        for col_idx in range(1, 16):
+        for col_idx in range(1, 15):
             sheet.cell(row=row_idx, column=col_idx).value = None
 
     current_row = 3
     for row in _sort_points_for_export(points):
-        sheet.cell(row=current_row, column=row.level).value = row.name
-        sheet.cell(row=current_row, column=8).value = ";".join(row.prerequisite_points) or None
-        sheet.cell(row=current_row, column=9).value = ";".join(row.postrequisite_points) or None
-        sheet.cell(row=current_row, column=10).value = ";".join(row.related_points) or None
-        sheet.cell(row=current_row, column=15).value = row.description or None
+        # New template uses column A for node type, and level columns start from column B.
+        sheet.cell(row=current_row, column=1).value = row.node_type
+        sheet.cell(row=current_row, column=row.level + 1).value = row.name
+        sheet.cell(row=current_row, column=9).value = ";".join(row.prerequisite_points) or None
+        sheet.cell(row=current_row, column=10).value = ";".join(row.postrequisite_points) or None
+        sheet.cell(row=current_row, column=11).value = ";".join(row.related_points) or None
+        sheet.cell(row=current_row, column=14).value = row.description or None
         current_row += 1
 
     output = io.BytesIO()
