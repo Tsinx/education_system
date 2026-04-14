@@ -1176,59 +1176,119 @@ async def rerank_similarity_pairs(
             logger.warning("rerank 本地失败，回退云端 | err={}", exc)
     model = model or settings.dashscope_rerank_model
     instruct_text = instruct or settings.rag_query_instruct
+    batch_size = max(1, int(settings.dashscope_rerank_batch_size or 1))
     url = f"{settings.dashscope_base_url}/rerank"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.dashscope_api_key}",
     }
-    logger.info("rerank 开始 | model={} | pair_count={}", model, len(pairs))
+    query_groups: dict[str, list[tuple[int, str]]] = {}
+    query_order: list[str] = []
+    for idx, (query, document) in enumerate(pairs):
+        normalized_query = _normalize_embedding_text(query)
+        normalized_doc = _normalize_embedding_text(document)
+        if normalized_query not in query_groups:
+            query_groups[normalized_query] = []
+            query_order.append(normalized_query)
+        query_groups[normalized_query].append((idx, normalized_doc))
+
+    logger.info(
+        "rerank 开始 | model={} | pair_count={} | query_groups={} | batch_size={}",
+        model,
+        len(pairs),
+        len(query_groups),
+        batch_size,
+    )
     t0 = time.monotonic()
-    scores: list[float] = []
+    scores: list[float] = [0.0] * len(pairs)
     sdk_module: Any | None = None
+    request_count = 0
     async with httpx.AsyncClient(timeout=httpx.Timeout(45.0)) as client:
-        for idx, (query, document) in enumerate(pairs, start=1):
-            try:
-                payload = {
-                    "model": model,
-                    "query": query,
-                    "documents": [document],
-                    "top_n": 1,
-                    "return_documents": False,
-                    "instruct": instruct_text,
-                }
-                resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                score = _extract_rerank_score(data)
-            except httpx.HTTPStatusError as exc:
-                if exc.response is None or exc.response.status_code != 404:
-                    raise
-                if sdk_module is None:
-                    sdk_module = _load_dashscope_sdk()
-                if sdk_module is None:
-                    raise
-                score = _rerank_score_via_sdk(sdk_module, model, query, document, instruct_text)
-            score = max(0.0, min(1.0, score))
-            scores.append(score)
-            if idx % 20 == 0:
-                logger.debug("rerank 进度: {}/{}", idx, len(pairs))
+        for query in query_order:
+            grouped = query_groups.get(query, [])
+            for i in range(0, len(grouped), batch_size):
+                chunk = grouped[i : i + batch_size]
+                chunk_indices = [item[0] for item in chunk]
+                chunk_docs = [item[1] for item in chunk]
+                request_count += 1
+                try:
+                    payload = {
+                        "model": model,
+                        "query": query,
+                        "documents": chunk_docs,
+                        "top_n": len(chunk_docs),
+                        "return_documents": False,
+                        "instruct": instruct_text,
+                    }
+                    resp = await client.post(url, headers=headers, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    chunk_scores = _extract_rerank_scores(data, len(chunk_docs))
+                except httpx.HTTPStatusError as exc:
+                    if exc.response is None or exc.response.status_code != 404:
+                        raise
+                    if sdk_module is None:
+                        sdk_module = _load_dashscope_sdk()
+                    if sdk_module is None:
+                        raise
+                    chunk_scores = _rerank_scores_via_sdk(
+                        sdk_module,
+                        model,
+                        query,
+                        chunk_docs,
+                        instruct_text,
+                    )
+                for index, score in zip(chunk_indices, chunk_scores):
+                    scores[index] = max(0.0, min(1.0, float(score)))
+                if request_count % 20 == 0:
+                    logger.debug("rerank 请求进度: {} 次", request_count)
     elapsed = time.monotonic() - t0
-    logger.info("rerank 完成 | score_count={} | 耗时={:.1f}s", len(scores), elapsed)
+    logger.info(
+        "rerank 完成 | score_count={} | requests={} | 耗时={:.1f}s",
+        len(scores),
+        request_count,
+        elapsed,
+    )
     return scores
 
 
-def _extract_rerank_score(data: dict[str, Any]) -> float:
+def _extract_rerank_scores(data: dict[str, Any], expected_count: int) -> list[float]:
+    if expected_count <= 0:
+        return []
     result = data.get("results") or data.get("data") or []
     if not isinstance(result, list) or not result:
-        return 0.0
-    first = result[0]
-    if not isinstance(first, dict):
-        return 0.0
-    raw = first.get("relevance_score", first.get("score", 0.0))
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
+        return [0.0] * expected_count
+
+    scores = [0.0] * expected_count
+    filled = [False] * expected_count
+    remaining: list[float] = []
+
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("relevance_score", item.get("score", 0.0))
+        try:
+            score = max(0.0, min(1.0, float(raw)))
+        except (TypeError, ValueError):
+            score = 0.0
+        raw_index = item.get("index")
+        try:
+            idx = int(raw_index)
+        except (TypeError, ValueError):
+            idx = -1
+        if 0 <= idx < expected_count and not filled[idx]:
+            scores[idx] = score
+            filled[idx] = True
+        else:
+            remaining.append(score)
+
+    for i in range(expected_count):
+        if filled[i]:
+            continue
+        if remaining:
+            scores[i] = remaining.pop(0)
+
+    return scores
 
 
 def _load_dashscope_sdk() -> Any | None:
@@ -1240,25 +1300,27 @@ def _load_dashscope_sdk() -> Any | None:
         return None
 
 
-def _rerank_score_via_sdk(
+def _rerank_scores_via_sdk(
     dashscope_module: Any,
     model: str,
     query: str,
-    document: str,
+    documents: list[str],
     instruct: str,
-) -> float:
+) -> list[float]:
+    if not documents:
+        return []
     resp = dashscope_module.TextReRank.call(
         model=model,
         query=query,
-        documents=[document],
-        top_n=1,
+        documents=documents,
+        top_n=len(documents),
         return_documents=False,
         instruct=instruct,
     )
     output = getattr(resp, "output", None)
     if isinstance(output, dict):
-        return _extract_rerank_score(output)
-    return 0.0
+        return _extract_rerank_scores(output, len(documents))
+    return [0.0] * len(documents)
 
 
 async def _request_embedding_batch(

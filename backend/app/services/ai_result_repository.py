@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from loguru import logger
+
 from app.schemas.ai_result import AiOutputType, AiResultDetail, AiResultItem
 
 
@@ -218,6 +220,21 @@ class AiResultRepository:
             )
             conn.commit()
 
+    def update_request_context(self, result_id: str, updates: dict[str, str]) -> None:
+        now = datetime.utcnow().isoformat()
+        current = self.get_result_item(result_id).request_context
+        merged = {**current}
+        for key, value in updates.items():
+            if value is None:
+                continue
+            merged[str(key)] = str(value)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE ai_results SET request_context = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=False), now, result_id),
+            )
+            conn.commit()
+
     def mark_done(self, result_id: str) -> None:
         now = datetime.utcnow().isoformat()
         with sqlite3.connect(self.db_path) as conn:
@@ -235,6 +252,28 @@ class AiResultRepository:
                 (error_message, now, result_id),
             )
             conn.commit()
+
+    def abandon_unfinished_results(self) -> int:
+        now = datetime.utcnow().isoformat()
+        message = "服务重启后已放弃历史生成任务（恢复机制暂未启用）"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE ai_results
+                SET status = 'failed',
+                    error_message = ?,
+                    updated_at = ?
+                WHERE status IN ('queued', 'running')
+                """,
+                (message, now),
+            )
+            conn.commit()
+        count = int(cursor.rowcount or 0)
+        if count > 0:
+            logger.info("AI 结果仓库启动清理：已放弃 {} 个历史未完成任务", count)
+        else:
+            logger.info("AI 结果仓库启动清理：无历史未完成任务需要放弃")
+        return count
 
     @staticmethod
     def _row_to_item(row: sqlite3.Row) -> AiResultItem:

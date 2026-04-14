@@ -17,8 +17,12 @@ import type {
   RefineKnowledgeGraphResult,
 } from '../types'
 
+const apiBaseUrl =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim().replace(/\/$/, '') ||
+  `${window.location.origin}/api/v1`
+
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api/v1',
+  baseURL: apiBaseUrl,
   timeout: 60000,
 })
 
@@ -163,15 +167,15 @@ export async function fetchAiResultDetail(resultId: string) {
 }
 
 export function buildStreamUrl(resultId: string) {
-  return `http://localhost:8000/api/v1/generation/stream/${resultId}`
+  return `${apiBaseUrl}/generation/stream/${resultId}`
 }
 
 export function buildExportUrl(resultId: string) {
-  return `http://localhost:8000/api/v1/generation/export/${resultId}`
+  return `${apiBaseUrl}/generation/export/${resultId}`
 }
 
 export function buildLessonBatchExportUrl(lessonBatchId: string) {
-  return `http://localhost:8000/api/v1/generation/export-batch/${lessonBatchId}`
+  return `${apiBaseUrl}/generation/export-batch/${lessonBatchId}`
 }
 
 export async function fetchProjects() {

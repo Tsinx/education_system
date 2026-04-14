@@ -26,10 +26,13 @@ from app.services.dashscope_service import (
 from app.services.bigmodel_mcp_service import build_web_search_context
 from app.services.exercise_generation_service import (
     analyze_exercise_requirements,
+    build_exercise_import_workbook_bytes,
     build_exercise_knowledge_context,
     draft_exercise_questions,
     finalize_exercise_questions,
+    question_requires_python_verification,
     render_exercise_markdown,
+    serialize_exercise_export_payload,
 )
 from app.services.local_retrieval_service import retrieve_course_chunks_local
 from app.services.material_pipeline import ai_result_repo, repository
@@ -210,6 +213,25 @@ def export_docx(result_id: str) -> StreamingResponse:
 
     if detail.status != "done" or not detail.content:
         raise HTTPException(status_code=400, detail="该结果尚未完成，无法导出") from None
+
+    if detail.output_type == "exercise":
+        raw_rows = detail.request_context.get("exercise_export_rows", "").strip()
+        if not raw_rows:
+            raise HTTPException(status_code=400, detail="该习题结果缺少结构化导出数据") from None
+        try:
+            rows = json.loads(raw_rows)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="习题导出数据损坏") from None
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=500, detail="习题导出数据格式错误") from None
+        filename = f"{detail.title}.xlsx"
+        encoded_filename = urllib.parse.quote(filename)
+        workbook_bytes = build_exercise_import_workbook_bytes(rows)
+        return StreamingResponse(
+            io.BytesIO(workbook_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
+        )
 
     filename = f"{detail.title}.docx"
     encoded_filename = urllib.parse.quote(filename)
@@ -393,7 +415,7 @@ async def _stream_exercise_result(
             knowledge_markdown=knowledge_md,
         )
 
-        yield f"data: {json.dumps({'status': 'planning', 'message': '阶段 2：生成题目与干扰项'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'status': 'planning', 'message': '阶段 2：先定题量与命题意图'}, ensure_ascii=False)}\n\n"
         draft = await draft_exercise_questions(
             course_name=course_name,
             course_description=course_description,
@@ -406,18 +428,22 @@ async def _stream_exercise_result(
             raise RuntimeError("未生成有效习题，请调整要求后重试")
 
         has_python_verification = any(
-            (
-                str(item.get("python_check_goal", "")).strip()
-                or str(item.get("type", "")).strip() in {"calculation", "计算", "计算题"}
-            )
+            question_requires_python_verification(item)
             for item in questions
             if isinstance(item, dict)
         )
         if has_python_verification:
-            yield f"data: {json.dumps({'status': 'python', 'message': '阶段 3：题目计算环节 Python 校验'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'status': 'python', 'message': '阶段 3：逐题计算校验与定稿'}, ensure_ascii=False)}\n\n"
         finalized_questions = await finalize_exercise_questions(questions, analysis)
+        ai_result_repo.update_request_context(
+            result_id,
+            {
+                "exercise_export_rows": serialize_exercise_export_payload(finalized_questions),
+                "exercise_question_count": str(len(finalized_questions)),
+            },
+        )
 
-        yield f"data: {json.dumps({'status': 'drafting', 'message': '阶段 4：整理答案与解析'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'status': 'drafting', 'message': '阶段 4：汇总题目并生成导出内容'}, ensure_ascii=False)}\n\n"
         markdown = render_exercise_markdown(
             course_name=course_name,
             exercise_requirements=exercise_requirements,

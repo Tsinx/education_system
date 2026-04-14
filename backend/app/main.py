@@ -22,6 +22,7 @@ app.include_router(api_router)
 def on_startup() -> None:
     repository.init()
     ai_result_repo.init()
+    ai_result_repo.abandon_unfinished_results()
     worker.start()
 
 
