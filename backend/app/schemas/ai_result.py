@@ -40,3 +40,6 @@ class AiGenerateRequest(BaseModel):
     lesson_count: int | None = None
     exercise_requirements: str = ""
     selected_knowledge_ids: list[str] = Field(default_factory=list)
+    llm_provider: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""

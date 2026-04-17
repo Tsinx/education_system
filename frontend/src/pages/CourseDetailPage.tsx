@@ -58,6 +58,7 @@ import {
   refineCourseKnowledgeGraph,
 } from '../api/client'
 import { useConversionQueue } from '../hooks/useConversionQueue'
+import { getRuntimeLlmConfig, loadLlmSettings } from '../utils/llmSettings'
 import type { AiOutputType, AiResultItem, Chapter, Course, CourseKnowledgeGraph } from '../types'
 
 const statusColorMap: Record<string, string> = {
@@ -304,6 +305,8 @@ export function CourseDetailPage() {
     if (!courseId || !selectedOutputType) return
     const outputType = selectedOutputType
     const userGuidance = generationGuidance.trim()
+    const llmSettings = loadLlmSettings()
+    const runtimeLlm = getRuntimeLlmConfig(llmSettings)
     const detectedIntent = detectLessonPlanIntent(userGuidance)
     const semesterCount = resolveSemesterLessonCount(course?.sessions, course?.hours)
     let submitScope: LessonPlanScope = lessonPlanScope
@@ -340,6 +343,7 @@ export function CourseDetailPage() {
         lesson_count: outputType === 'lesson_plan' ? submitCount : undefined,
         exercise_requirements: outputType === 'exercise' ? userGuidance : undefined,
         selected_knowledge_ids: outputType === 'exercise' ? checkedKnowledgeIds : undefined,
+        llm: runtimeLlm,
       })
       setAiResults((prev) => [...results, ...prev])
       setGenerationModalOpen(false)
@@ -376,7 +380,7 @@ export function CourseDetailPage() {
   const startStreaming = useCallback((resultId: string) => {
     if (activeStreams.current[resultId]) return
     activeStreams.current[resultId] = true
-    const url = buildStreamUrl(resultId)
+    const url = buildStreamUrl(resultId, getRuntimeLlmConfig())
     const evtSource = new EventSource(url)
     let doneTimer: ReturnType<typeof setTimeout> | null = null
     streamingMap.current[resultId] = ''

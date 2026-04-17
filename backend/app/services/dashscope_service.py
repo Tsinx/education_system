@@ -4,6 +4,8 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import AsyncGenerator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from app.core.config import settings
 from app.services.local_rag_service import embed_texts_local, rerank_similarity_pairs_local
 
 _LESSON_PLAN_TEMPLATE_CACHE: str | None = None
+_RUNTIME_LLM_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar("runtime_llm_override", default=None)
 
 _PROMPT_OUTLINE = """你是一位资深的大学课程设计专家，熟悉中国高校课程教学大纲的编写规范。请根据以下课程信息和知识库内容，生成一份符合中国高校标准的课程教学大纲。
 
@@ -654,6 +657,10 @@ def _load_lesson_plan_template_reference() -> str:
 
 
 def _resolve_llm_provider() -> str:
+    override = _RUNTIME_LLM_OVERRIDE.get() or {}
+    override_provider = (override.get("provider") or "").strip().lower()
+    if override_provider in ("deepseek", "dashscope", "openrouter"):
+        return override_provider
     provider = (settings.llm_provider or "dashscope").strip().lower()
     if provider in ("deepseek", "dashscope", "openrouter"):
         return provider
@@ -662,20 +669,50 @@ def _resolve_llm_provider() -> str:
 
 def _resolve_llm_endpoint_and_key() -> tuple[str, str]:
     provider = _resolve_llm_provider()
+    override = _RUNTIME_LLM_OVERRIDE.get() or {}
+    override_key = (override.get("api_key") or "").strip()
     if provider == "deepseek":
-        return settings.deepseek_base_url, settings.deepseek_api_key
+        return settings.deepseek_base_url, (override_key or settings.deepseek_api_key)
     if provider == "openrouter":
-        return settings.openrouter_base_url, settings.openrouter_api_key
-    return settings.dashscope_base_url, settings.dashscope_api_key
+        return settings.openrouter_base_url, (override_key or settings.openrouter_api_key)
+    return settings.dashscope_base_url, (override_key or settings.dashscope_api_key)
 
 
 def _resolve_default_chat_model() -> str:
+    override = _RUNTIME_LLM_OVERRIDE.get() or {}
+    override_model = (override.get("model") or "").strip()
+    if override_model:
+        return override_model
     provider = _resolve_llm_provider()
     if provider == "deepseek":
         return settings.deepseek_model
     if provider == "openrouter":
         return settings.openrouter_model
     return settings.dashscope_model
+
+
+@contextmanager
+def llm_runtime_override(
+    *,
+    provider: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+):
+    normalized: dict[str, str] = {}
+    provider_text = (provider or "").strip().lower()
+    if provider_text:
+        normalized["provider"] = provider_text
+    api_key_text = (api_key or "").strip()
+    if api_key_text:
+        normalized["api_key"] = api_key_text
+    model_text = (model or "").strip()
+    if model_text:
+        normalized["model"] = model_text
+    token = _RUNTIME_LLM_OVERRIDE.set(normalized or None)
+    try:
+        yield
+    finally:
+        _RUNTIME_LLM_OVERRIDE.reset(token)
 
 
 def _build_provider_error(provider: str, response: httpx.Response) -> str:

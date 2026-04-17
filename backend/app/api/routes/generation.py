@@ -5,6 +5,7 @@ import re
 import tempfile
 import urllib.parse
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, AsyncGenerator
 from uuid import uuid4
@@ -21,6 +22,7 @@ from app.services.dashscope_service import (
     build_generation_strategy_prompt,
     build_outline_prompt,
     chat_once,
+    llm_runtime_override,
     stream_chat,
 )
 from app.services.bigmodel_mcp_service import build_web_search_context
@@ -40,10 +42,67 @@ from app.services.material_pipeline import ai_result_repo, repository
 router = APIRouter(prefix="/generation", tags=["generation"])
 
 
+def _normalize_runtime_llm_provider(raw: str) -> str:
+    value = raw.strip().lower()
+    if not value:
+        return ""
+    if value in {"dashscope", "qwen"}:
+        return "dashscope"
+    raise HTTPException(status_code=400, detail="当前仅支持通义千问（Qwen）自填 API Key")
+
+
+def _build_runtime_llm_override(
+    provider_raw: str | None,
+    api_key_raw: str | None,
+    model_raw: str | None,
+) -> dict[str, str]:
+    provider_text = (provider_raw or "").strip()
+    api_key_text = (api_key_raw or "").strip()
+    model_text = (model_raw or "").strip()
+    if not provider_text and not api_key_text and not model_text:
+        return {}
+
+    provider = _normalize_runtime_llm_provider(provider_text) if provider_text else ""
+    if not provider and (api_key_text or model_text):
+        provider = "dashscope"
+
+    override: dict[str, str] = {}
+    if provider:
+        override["provider"] = provider
+    if api_key_text:
+        override["api_key"] = api_key_text
+    if model_text:
+        override["model"] = model_text
+    return override
+
+
+def _llm_override_context(override: dict[str, str]):
+    if not override:
+        return nullcontext()
+    return llm_runtime_override(
+        provider=override.get("provider"),
+        api_key=override.get("api_key"),
+        model=override.get("model"),
+    )
+
+
+async def _stream_ai_result_with_runtime_llm(
+    result_id: str,
+    course_id: str,
+    output_type: AiOutputType,
+    user_guidance: str,
+    llm_override: dict[str, str],
+) -> AsyncGenerator[str, None]:
+    with _llm_override_context(llm_override):
+        async for event in _stream_ai_result(result_id, course_id, output_type, user_guidance):
+            yield event
+
+
 @router.post("/start", response_model=list[AiResultItem])
 async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
     results: list[AiResultItem] = []
     user_guidance = payload.user_guidance.strip()
+    llm_override = _build_runtime_llm_override(payload.llm_provider, payload.llm_api_key, payload.llm_model)
     course_name, hours, course_description, sessions = _get_course_info(payload.course_id)
     if "ideology_case" in payload.output_types and not _load_outline_reference(payload.course_id):
         raise HTTPException(status_code=400, detail="请先生成并完成课程大纲，再创建思政案例") from None
@@ -84,12 +143,13 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
             outline_reference = _load_outline_reference(payload.course_id)
             if not outline_reference:
                 raise HTTPException(status_code=400, detail="请先生成并完成课程大纲，再创建思政案例") from None
-            workflow = await _plan_ideology_case_workflow(
-                course_name=course_name,
-                course_description=course_description,
-                outline_reference=outline_reference,
-                user_guidance=user_guidance,
-            )
+            with _llm_override_context(llm_override):
+                workflow = await _plan_ideology_case_workflow(
+                    course_name=course_name,
+                    course_description=course_description,
+                    outline_reference=outline_reference,
+                    user_guidance=user_guidance,
+                )
             logger.info(
                 "思政案例 Agentic 工作流完成 | course={} | topic={} | search_needed={}",
                 payload.course_id,
@@ -113,15 +173,16 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
             )
             results.append(item)
             continue
-        workflow = await _plan_lesson_plan_workflow(
-            course_name=course_name,
-            course_description=course_description,
-            hours=hours,
-            sessions=sessions,
-            user_guidance=user_guidance,
-            requested_scope=payload.lesson_plan_scope,
-            requested_count=payload.lesson_count,
-        )
+        with _llm_override_context(llm_override):
+            workflow = await _plan_lesson_plan_workflow(
+                course_name=course_name,
+                course_description=course_description,
+                hours=hours,
+                sessions=sessions,
+                user_guidance=user_guidance,
+                requested_scope=payload.lesson_plan_scope,
+                requested_count=payload.lesson_count,
+            )
         logger.info(
             "教案 Agentic 工作流完成 | course={} | mode={} | count={} | explicit={}",
             payload.course_id,
@@ -130,13 +191,14 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
             workflow["explicit"],
         )
         topics = workflow["topics"]
-        modules = await _plan_lesson_modules(
-            course_id=payload.course_id,
-            workflow_mode=workflow["mode"],
-            lesson_count=workflow["count"],
-            user_guidance=user_guidance,
-            fallback_topics=topics,
-        )
+        with _llm_override_context(llm_override):
+            modules = await _plan_lesson_modules(
+                course_id=payload.course_id,
+                workflow_mode=workflow["mode"],
+                lesson_count=workflow["count"],
+                user_guidance=user_guidance,
+                fallback_topics=topics,
+            )
         lesson_batch_id = f"lpb_{uuid4().hex[:12]}" if workflow["count"] > 1 else ""
         for idx in range(workflow["count"]):
             lesson_idx = idx + 1
@@ -170,7 +232,13 @@ async def start_generation(payload: AiGenerateRequest) -> list[AiResultItem]:
 
 
 @router.get("/stream/{result_id}")
-async def stream_generation(result_id: str) -> StreamingResponse:
+async def stream_generation(
+    result_id: str,
+    llm_provider: str = Query(default=""),
+    llm_api_key: str = Query(default=""),
+    llm_model: str = Query(default=""),
+) -> StreamingResponse:
+    llm_override = _build_runtime_llm_override(llm_provider, llm_api_key, llm_model)
     try:
         item = ai_result_repo.get_result_item(result_id)
     except KeyError:
@@ -185,7 +253,13 @@ async def stream_generation(result_id: str) -> StreamingResponse:
         )
 
     return StreamingResponse(
-        _stream_ai_result(result_id, item.course_id, item.output_type, item.request_context.get("user_guidance", "")),
+        _stream_ai_result_with_runtime_llm(
+            result_id,
+            item.course_id,
+            item.output_type,
+            item.request_context.get("user_guidance", ""),
+            llm_override,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

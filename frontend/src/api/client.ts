@@ -26,6 +26,12 @@ const api = axios.create({
   timeout: 60000,
 })
 
+export type RuntimeLlmOptions = {
+  provider?: string
+  apiKey?: string
+  model?: string
+}
+
 export async function fetchCourses() {
   try {
     const { data } = await api.get<Course[]>('/courses')
@@ -140,8 +146,12 @@ export async function startAiGeneration(
     lesson_count?: number
     exercise_requirements?: string
     selected_knowledge_ids?: string[]
+    llm?: RuntimeLlmOptions
   },
 ): Promise<AiResultItem[]> {
+  const llmProvider = options?.llm?.provider?.trim()
+  const llmApiKey = options?.llm?.apiKey?.trim()
+  const llmModel = options?.llm?.model?.trim()
   const { data } = await api.post<AiResultItem[]>('/generation/start', {
     course_id: courseId,
     output_types: outputTypes,
@@ -150,6 +160,9 @@ export async function startAiGeneration(
     lesson_count: options?.lesson_count ?? null,
     exercise_requirements: options?.exercise_requirements ?? '',
     selected_knowledge_ids: options?.selected_knowledge_ids ?? [],
+    llm_provider: llmProvider ?? '',
+    llm_api_key: llmApiKey ?? '',
+    llm_model: llmModel ?? '',
   })
   return data
 }
@@ -166,8 +179,17 @@ export async function fetchAiResultDetail(resultId: string) {
   return data
 }
 
-export function buildStreamUrl(resultId: string) {
-  return `${apiBaseUrl}/generation/stream/${resultId}`
+export function buildStreamUrl(resultId: string, llm?: RuntimeLlmOptions) {
+  const base = `${apiBaseUrl}/generation/stream/${resultId}`
+  const params = new URLSearchParams()
+  const provider = llm?.provider?.trim()
+  const apiKey = llm?.apiKey?.trim()
+  const model = llm?.model?.trim()
+  if (provider) params.set('llm_provider', provider)
+  if (apiKey) params.set('llm_api_key', apiKey)
+  if (model) params.set('llm_model', model)
+  const query = params.toString()
+  return query ? `${base}?${query}` : base
 }
 
 export function buildExportUrl(resultId: string) {

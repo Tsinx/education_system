@@ -1,10 +1,39 @@
+import { useEffect } from 'react'
 import { Button, Card, Col, Divider, Form, Input, Row, Select, Space, Switch, Tag, Typography, message } from 'antd'
+import { getDefaultLlmSettings, loadLlmSettings, saveLlmSettings, type DefaultAiModel } from '../utils/llmSettings'
+
+type AiSettingsFormValues = {
+  autoGenerate: boolean
+  defaultModel: DefaultAiModel
+  apiKey: string
+  qwenModel: string
+}
 
 export function SettingsPage() {
   const [messageApi, contextHolder] = message.useMessage()
+  const [aiForm] = Form.useForm<AiSettingsFormValues>()
+  const selectedModel = Form.useWatch('defaultModel', aiForm)
 
-  const handleSave = () => {
-    messageApi.success('设置已保存')
+  useEffect(() => {
+    aiForm.setFieldsValue(loadLlmSettings())
+  }, [aiForm])
+
+  const handleSave = async () => {
+    const values = await aiForm.validateFields()
+    saveLlmSettings({
+      autoGenerate: values.autoGenerate,
+      defaultModel: values.defaultModel,
+      apiKey: values.apiKey ?? '',
+      qwenModel: values.qwenModel ?? '',
+    })
+    messageApi.success('设置已保存，下一次 AI 生成会生效')
+  }
+
+  const handleRestoreDefaults = () => {
+    const defaults = getDefaultLlmSettings()
+    aiForm.setFieldsValue(defaults)
+    saveLlmSettings(defaults)
+    messageApi.success('已恢复默认设置')
   }
 
   return (
@@ -65,7 +94,7 @@ export function SettingsPage() {
         </Row>
 
         <Card className="notebook-panel" title="AI 生成设置">
-          <Form layout="vertical" initialValues={{ autoGenerate: true, defaultModel: 'deepseek' }}>
+          <Form form={aiForm} layout="vertical" initialValues={loadLlmSettings()}>
             <Row gutter={16}>
               <Col xs={24} md={12}>
                 <Form.Item label="上传资料后自动触发 AI 生成" name="autoGenerate" valuePropName="checked">
@@ -78,7 +107,7 @@ export function SettingsPage() {
                     options={[
                       { value: 'deepseek', label: 'DeepSeek' },
                       { value: 'gpt4', label: 'GPT-4o' },
-                      { value: 'qwen', label: '通义千问' },
+                      { value: 'qwen', label: '通义千问（已接通）' },
                     ]}
                   />
                 </Form.Item>
@@ -87,13 +116,23 @@ export function SettingsPage() {
             <Form.Item label="API Key" name="apiKey">
               <Input.Password placeholder="请输入 AI 模型的 API Key" />
             </Form.Item>
+            {selectedModel === 'qwen' && (
+              <Form.Item label="千问模型名" name="qwenModel" tooltip="默认 qwen3.5-plus">
+                <Input placeholder="例如：qwen3.5-plus" />
+              </Form.Item>
+            )}
+            {selectedModel && selectedModel !== 'qwen' && (
+              <Typography.Text type="secondary">
+                当前版本先支持通义千问自填 API Key，其它模型的前端自填能力后续补齐。
+              </Typography.Text>
+            )}
           </Form>
         </Card>
 
         <Divider />
         <Space>
-          <Button type="primary" onClick={handleSave}>保存设置</Button>
-          <Button>恢复默认</Button>
+          <Button type="primary" onClick={() => void handleSave()}>保存设置</Button>
+          <Button onClick={handleRestoreDefaults}>恢复默认</Button>
         </Space>
       </div>
     </>
